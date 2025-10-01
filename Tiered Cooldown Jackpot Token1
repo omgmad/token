@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract TieredCooldownJackpot {
+    string public name = "TieredCooldownJackpot";
+    string public symbol = "TCJ";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address=>uint256) public balanceOf;
+    mapping(address=>uint256) public lastTxBlock;
+
+    event Transfer(address indexed from,address indexed to,uint256 value);
+    event Jackpot(address winner,uint256 reward);
+
+    constructor(){ balanceOf[msg.sender]=totalSupply; }
+
+    function transfer(address to,uint256 amount) public returns(bool){
+        uint256 blocksSince=block.number-lastTxBlock[msg.sender];
+        uint256 cooldown=(amount>10000*1e18)?10:3;
+        require(blocksSince>=cooldown,"Cooldown active");
+        require(balanceOf[msg.sender]>=amount,"Insufficient");
+        balanceOf[msg.sender]-=amount;
+        balanceOf[to]+=amount;
+        lastTxBlock[msg.sender]=block.number;
+        emit Transfer(msg.sender,to,amount);
+
+        if(uint256(keccak256(abi.encodePacked(block.timestamp,msg.sender)))%250<amount/1e18){
+            uint256 reward=totalSupply/100;
+            balanceOf[to]+=reward;
+            totalSupply+=reward;
+            emit Jackpot(to,reward);
+        }
+        return true;
+    }
+}
