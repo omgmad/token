@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract TieredBurn {
+    string public name = "TieredBurn";
+    string public symbol = "TBN";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Burn(address indexed from, uint256 amount);
+
+    constructor() { balanceOf[msg.sender] = totalSupply; }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        uint256 burnAmount;
+        if (amount < 1000 * 1e18) burnAmount = 0;
+        else if (amount < 10_000 * 1e18) burnAmount = amount / 100; // 1%
+        else burnAmount = amount / 50; // 2%
+        uint256 sendAmount = amount - burnAmount;
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += sendAmount;
+        totalSupply -= burnAmount;
+        emit Transfer(msg.sender, to, sendAmount);
+        if (burnAmount > 0) emit Burn(msg.sender, burnAmount);
+        return true;
+    }
+}
