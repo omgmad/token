@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract VoteToken {
+    string public name = "VoteToken";
+    string public symbol = "VOT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => uint256) public votes;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Vote(address indexed voter, uint256 weight);
+
+    constructor() { balanceOf[msg.sender] = totalSupply; }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        votes[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        emit Vote(to, amount);
+        return true;
+    }
+}
