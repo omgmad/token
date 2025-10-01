@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract DecayReflect {
+    string public name = "DecayReflect";
+    string public symbol = "DRF";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+    uint256 public decayRate = 1; // 1% per day
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => uint256) public lastUpdate;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    constructor() { balanceOf[msg.sender] = totalSupply; lastUpdate[msg.sender] = block.timestamp; }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        _applyDecay(msg.sender);
+        _applyDecay(to);
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function _applyDecay(address user) internal {
+        uint256 elapsed = block.timestamp - lastUpdate[user];
+        if (elapsed > 0 && balanceOf[user] > 0) {
+            uint256 decay = (balanceOf[user] * decayRate * elapsed) / (100 * 86400);
+            balanceOf[user] -= decay;
+            totalSupply -= decay;
+        }
+        lastUpdate[user] = block.timestamp;
+    }
+}
