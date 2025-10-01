@@ -1,0 +1,258 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+/* ======================================================
+   Advanced ERC20 Token
+   Name: test
+   Symbol: TEST
+   Decimals: 18
+   Max Supply: 1,000,000,000 (1B) tokens
+   Features: Burnable, Pausable, Permit (EIP-2612), Capped
+   ====================================================== */
+
+// ========== Context ==========
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// ========== Ownable ==========
+abstract contract Ownable is Context {
+    address private _owner;
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: not owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: zero addr");
+        _transferOwnership(newOwner);
+    }
+
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    function _transferOwnership(address newOwner) internal virtual {
+        address old = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(old, newOwner);
+    }
+}
+
+// ========== Pausable ==========
+abstract contract Pausable is Context {
+    bool private _paused;
+    event Paused(address account);
+    event Unpaused(address account);
+
+    constructor() {
+        _paused = false;
+    }
+
+    modifier whenNotPaused() {
+        require(!_paused, "Pausable: paused");
+        _;
+    }
+
+    modifier whenPaused() {
+        require(_paused, "Pausable: not paused");
+        _;
+    }
+
+    function paused() public view virtual returns (bool) {
+        return _paused;
+    }
+
+    function _pause() internal virtual whenNotPaused {
+        _paused = true;
+        emit Paused(_msgSender());
+    }
+
+    function _unpause() internal virtual whenPaused {
+        _paused = false;
+        emit Unpaused(_msgSender());
+    }
+}
+
+// ========== IERC20 ==========
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient,uint256 amount) external returns (bool);
+    function allowance(address owner,address spender) external view returns (uint256);
+    function approve(address spender,uint256 amount) external returns (bool);
+    function transferFrom(address sender,address recipient,uint256 amount) external returns (bool);
+
+    event Transfer(address indexed from,address indexed to,uint256 value);
+    event Approval(address indexed owner,address indexed spender,uint256 value);
+}
+
+// ========== ERC20 ==========
+contract ERC20 is Context, IERC20 {
+    mapping(address => uint256) internal _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 internal _totalSupply;
+
+    string private _name;
+    string private _symbol;
+    uint8 private _decimals;
+
+    constructor(string memory n, string memory s) {
+        _name = n;
+        _symbol = s;
+        _decimals = 18;
+    }
+
+    function name() public view returns(string memory){return _name;}
+    function symbol() public view returns(string memory){return _symbol;}
+    function decimals() public view returns(uint8){return _decimals;}
+    function totalSupply() public view override returns(uint256){return _totalSupply;}
+    function balanceOf(address a) public view override returns(uint256){return _balances[a];}
+
+    function transfer(address r,uint256 a) public override returns(bool){
+        _transfer(_msgSender(),r,a);
+        return true;
+    }
+    function allowance(address o,address s) public view override returns(uint256){return _allowances[o][s];}
+    function approve(address s,uint256 a) public override returns(bool){
+        _approve(_msgSender(),s,a);
+        return true;
+    }
+    function transferFrom(address s,address r,uint256 a) public override returns(bool){
+        uint256 current = _allowances[s][_msgSender()];
+        require(current >= a,"ERC20: exceeds allowance");
+        _transfer(s,r,a);
+        _approve(s,_msgSender(),current - a);
+        return true;
+    }
+
+    function _transfer(address f,address t,uint256 a) internal virtual {
+        require(f!=address(0)&&t!=address(0),"ERC20: zero addr");
+        require(_balances[f]>=a,"ERC20: insufficient");
+        _beforeTokenTransfer(f,t,a);
+        _balances[f]-=a;
+        _balances[t]+=a;
+        emit Transfer(f,t,a);
+    }
+
+    function _mint(address a,uint256 amt) internal virtual {
+        require(a!=address(0),"ERC20: mint zero addr");
+        _beforeTokenTransfer(address(0),a,amt);
+        _totalSupply+=amt;
+        _balances[a]+=amt;
+        emit Transfer(address(0),a,amt);
+    }
+
+    function _burn(address a,uint256 amt) internal virtual {
+        require(a!=address(0),"ERC20: burn zero addr");
+        require(_balances[a]>=amt,"ERC20: burn exceeds balance");
+        _beforeTokenTransfer(a,address(0),amt);
+        _balances[a]-=amt;
+        _totalSupply-=amt;
+        emit Transfer(a,address(0),amt);
+    }
+
+    function _approve(address o,address s,uint256 amt) internal virtual {
+        require(o!=address(0)&&s!=address(0),"ERC20: zero addr");
+        _allowances[o][s]=amt;
+        emit Approval(o,s,amt);
+    }
+
+    function _beforeTokenTransfer(address from,address to,uint256 amount) internal virtual {}
+}
+
+// ========== ERC20Burnable ==========
+abstract contract ERC20Burnable is Context, ERC20 {
+    function burn(uint256 amt) public virtual {
+        _burn(_msgSender(),amt);
+    }
+    function burnFrom(address account,uint256 amt) public virtual {
+        uint256 current = allowance(account,_msgSender());
+        require(current>=amt,"ERC20: burn exceeds allowance");
+        _approve(account,_msgSender(),current-amt);
+        _burn(account,amt);
+    }
+}
+
+// ========== ERC20Capped ==========
+abstract contract ERC20Capped is ERC20 {
+    uint256 private immutable _cap;
+    constructor(uint256 cap_) {
+        require(cap_>0,"ERC20Capped: cap 0");
+        _cap=cap_;
+    }
+    function cap() public view returns(uint256){return _cap;}
+    function _mint(address a,uint256 amt) internal virtual override {
+        require(totalSupply()+amt<=cap(),"ERC20Capped: cap exceeded");
+        super._mint(a,amt);
+    }
+}
+
+// ========== ERC20Pausable ==========
+abstract contract ERC20Pausable is ERC20, Pausable {
+    function _beforeTokenTransfer(address from,address to,uint256 amount) internal virtual override {
+        super._beforeTokenTransfer(from,to,amount);
+        require(!paused(),"ERC20Pausable: token transfer while paused");
+    }
+}
+
+// ========== ERC20Permit (EIP-2612) ==========
+abstract contract ERC20Permit is ERC20 {
+    mapping(address=>uint256) public nonces;
+    bytes32 public immutable DOMAIN_SEPARATOR;
+    bytes32 public constant PERMIT_TYPEHASH = keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+
+    constructor(string memory n,string memory s) ERC20(n,s) {
+        uint256 chainId;
+        assembly { chainId := chainid() }
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes(n)),
+                keccak256(bytes("1")),
+                chainId,
+                address(this)
+            )
+        );
+    }
+
+    function permit(address owner,address spender,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s) public {
+        require(block.timestamp<=deadline,"ERC20Permit: expired");
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                DOMAIN_SEPARATOR,
+                keccak256(abi.encode(PERMIT_TYPEHASH,owner,spender,value,nonces[owner]++,deadline))
+            )
+        );
+        address recovered = ecrecover(digest,v,r,s);
+        require(recovered!=address(0)&&recovered==owner,"ERC20Permit: invalid sig");
+        _approve(owner,spender,value);
+    }
+}
+
+// ========== Final Token ==========
+contract TestAdvanced is ERC20Permit, ERC20Burnable, ERC20Capped, ERC20Pausable, Ownable {
+    constructor() ERC20Permit("test","TEST") ERC20Capped(1_000_000_000 * 10**18) {
+        _mint(msg.sender,1_000_000_000 * 10**18);
+    }
+
+    // admin functions
+    function pause() external onlyOwner {_pause();}
+    function unpause() external onlyOwner {_unpause();}
+}
