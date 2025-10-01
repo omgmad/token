@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract StakingToken {
+    string public name = "StakingToken";
+    string public symbol = "STK";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => uint256) public staked;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Stake(address indexed user, uint256 amount);
+    event Reward(address indexed user, uint256 amount);
+
+    constructor() { balanceOf[msg.sender] = totalSupply; }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function stake(uint256 amount) public {
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        balanceOf[msg.sender] -= amount;
+        staked[msg.sender] += amount;
+        emit Stake(msg.sender, amount);
+    }
+
+    function claimReward() public {
+        uint256 reward = staked[msg.sender] / 100; // 1% simple reward
+        balanceOf[msg.sender] += reward;
+        emit Reward(msg.sender, reward);
+    }
+}
