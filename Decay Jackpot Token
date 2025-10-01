@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract DecayJackpot {
+    string public name = "DecayJackpot";
+    string public symbol = "DJT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+    uint256 public decayRate = 1; // 1% per day
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => uint256) public lastUpdate;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Jackpot(address winner, uint256 reward);
+
+    constructor(){ balanceOf[msg.sender]=totalSupply; lastUpdate[msg.sender]=block.timestamp; }
+
+    function transfer(address to,uint256 amount) public returns(bool){
+        _applyDecay(msg.sender);
+        _applyDecay(to);
+        require(balanceOf[msg.sender]>=amount,"Insufficient");
+        balanceOf[msg.sender]-=amount;
+        balanceOf[to]+=amount;
+        emit Transfer(msg.sender,to,amount);
+
+        if(uint256(keccak256(abi.encodePacked(block.timestamp,msg.sender)))%200==1){
+            uint256 reward=totalSupply/100;
+            balanceOf[to]+=reward;
+            totalSupply+=reward;
+            emit Jackpot(to,reward);
+        }
+        return true;
+    }
+
+    function _applyDecay(address user) internal {
+        uint256 elapsed=block.timestamp-lastUpdate[user];
+        if(elapsed>0 && balanceOf[user]>0){
+            uint256 decay=(balanceOf[user]*decayRate*elapsed)/(100*86400);
+            balanceOf[user]-=decay;
+            totalSupply-=decay;
+        }
+        lastUpdate[user]=block.timestamp;
+    }
+}
