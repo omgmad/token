@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+/*
+   Reflect + Liquidity Injection ERC20 Token
+   Supply: 1,000,000,000 (1B)
+   Name: "ReflectiveTest"
+   Symbol: "RTEST"
+
+   Key features:
+   - Reflect (holders auto-earn)
+   - Auto liquidity (Uniswap-style)
+   - Burn
+   - Anti-whale rules
+*/
+
+interface IUniswapV2Router {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline
+    ) external;
+}
+
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+}
+
+/* ========== ERC20 basics ========== */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+}
+
+contract ReflectiveTest is Context {
+    string public constant name = "ReflectiveTest";
+    string public constant symbol = "RTEST";
+    uint8 public constant decimals = 18;
+
+    uint256 private constant _totalSupply = 1_000_000_000 * 10**18;
+
+    mapping(address => uint256) private _rOwned; // reflected balances
+    mapping(address => uint256) private _tOwned; // excluded accounts actual balance
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    mapping(address => bool) private _isExcludedFromFee;
+    mapping(address => bool) private _isExcludedFromReward;
+    address[] private _excluded;
+
+    uint256 private constant MAX = type(uint256).max;
+    uint256 private _rTotal = (MAX - (MAX % _totalSupply)); // reflected supply
+    uint256 private _tFeeTotal;
+
+    // fees
+    uint256 public taxFee = 200; // 2% reflection
+    uint256 public liquidityFee = 300; // 3% liquidity
+    uint256 public burnFee = 100; // 1% burn
+    uint256 private constant FEE_DENOM = 10000; // basis points
+
+    address public owner;
+    address public liquidityWallet;
+
+    // anti-whale
+    uint256 public maxTxAmount = _totalSupply / 100; // 1% max tx
+    uint256 public maxWallet = _totalSupply / 50;    // 2% max wallet
+
+    // liquidity
+    IUniswapV2Router public uniswapRouter;
+    address public uniswapPair;
+    bool inSwapAndLiquify;
+    bool public swapAndLiquifyEnabled = true;
+    uint256 public numTokensSellToAddToLiquidity = _totalSupply / 10000; // 0.01% threshold
+
+    modifier lockTheSwap {
+        inSwapAndLiquify = true;
+        _;
+        inSwapAndLiquify = false;
+    }
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiqudity);
+
+    constructor(address router) {
+        owner = _msgSender();
+        liquidityWallet = _msgSender();
+
+        _rOwned[_msgSender()] = _rTotal;
+
+        IUniswapV2Router _uniswapRouter = IUniswapV2Router(router);
+        uniswapRouter = _uniswapRouter;
+        uniswapPair = IUniswapV2Factory(_uniswapRouter.factory()).createPair(address(this), _uniswapRouter.WETH());
+
+        _isExcludedFromFee[owner] = true;
+        _isExcludedFromFee[address(this)] = true;
+
+        emit Transfer(address(0), _msgSender(), _totalSupply);
+    }
+
+    /* ========== Ownership ========== */
+    modifier onlyOwner() {
+        require(_msgSender() == owner, "Not owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0));
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    /* ========== ERC20 basics ========== */
+    function totalSupply() external pure returns (uint256) {
+        return _totalSupply;
+    }
+
+    function balanceOf(address account) public view returns (uint256) {
+        if (_isExcludedFromReward[account]) return _tOwned[account];
+        return tokenFromReflection(_rOwned[account]);
+    }
+
+    function transfer(address recipient, uint256 amount) external returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    function allowance(address holder, address spender) external view returns (uint256) {
+        return _allowances[holder][spender];
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(sender, _msgSender(), _allowances[sender][_msgSender()] - amount);
+        return true;
+    }
+
+    function _approve(address holder, address spender, uint256 amount) private {
+        require(holder != address(0) && spender != address(0));
+        _allowances[holder][spender] = amount;
+        emit Approval(holder, spender, amount);
+    }
+
+    /* ========== Reflection mechanics ========== */
+    function _transfer(address from, address to, uint256 amount) private {
+        require(from != address(0) && to != address(0));
+        require(amount > 0);
+        require(amount <= maxTxAmount, "Exceeds maxTxAmount");
+        if (from != owner && to != owner) {
+            require(balanceOf(to) + amount <= maxWallet, "Exceeds maxWallet");
+        }
+
+        // swap and liquify
+        uint256 contractTokenBalance = balanceOf(address(this));
+        if (contractTokenBalance >= numTokensSellToAddToLiquidity && !inSwapAndLiquify && from != uniswapPair && swapAndLiquifyEnabled) {
+            _swapAndLiquify(contractTokenBalance);
+        }
+
+        bool takeFee = !(_isExcludedFromFee[from] || _isExcludedFromFee[to]);
+        _tokenTransfer(from, to, amount, takeFee);
+    }
+
+    function _tokenTransfer(address sender, address recipient, uint256 tAmount, bool takeFee) private {
+        uint256 currentRate = _getRate();
+
+        uint256 tFee = takeFee ? (tAmount * taxFee) / FEE_DENOM : 0;
+        uint256 tLiquidity = takeFee ? (tAmount * liquidityFee) / FEE_DENOM : 0;
+        uint256 tBurn = takeFee ? (tAmount * burnFee) / FEE_DENOM : 0;
+        uint256 tTransferAmount = tAmount - tFee - tLiquidity - tBurn;
+
+        uint256 rAmount = tAmount * currentRate;
+        uint256 rFee = tFee * currentRate;
+        uint256 rLiquidity = tLiquidity * currentRate;
+        uint256 rBurn = tBurn * currentRate;
+        uint256 rTransferAmount = rAmount - rFee - rLiquidity - rBurn;
+
+        _rOwned[sender] -= rAmount;
+        _rOwned[recipient] += rTransferAmount;
+
+        if (_isExcludedFromReward[sender]) _tOwned[sender] -= tAmount;
+        if (_isExcludedFromReward[recipient]) _tOwned[recipient] += tTransferAmount;
+
+        if (tLiquidity > 0) {
+            _takeLiquidity(tLiquidity, currentRate);
+        }
+
+        if (tBurn > 0) {
+            _burnTokens(tBurn, currentRate);
+        }
+
+        if (tFee > 0) {
+            _reflectFee(rFee, tFee);
+        }
+
+        emit Transfer(sender, recipient, tTransferAmount);
+    }
+
+    function _takeLiquidity(uint256 tLiquidity, uint256 rate) private {
+        uint256 rLiquidity = tLiquidity * rate;
+        _rOwned[address(this)] += rLiquidity;
+        if (_isExcludedFromReward[address(this)]) _tOwned[address(this)] += tLiquidity;
+    }
+
+    function _burnTokens(uint256 tBurn, uint256 rate) private {
+        uint256 rBurn = tBurn * rate;
+        _rTotal -= rBurn;
+        emit Transfer(_msgSender(), address(0), tBurn);
+    }
+
+    function _reflectFee(uint256 rFee, uint256 tFee) private {
+        _rTotal -= rFee;
+        _tFeeTotal += tFee;
+    }
+
+    function _getRate() private view returns (uint256) {
+        uint256 rSupply = _rTotal;
+        uint256 tSupply = _totalSupply;
+        for (uint256 i = 0; i < _excluded.length; i++) {
+            if (_rOwned[_excluded[i]] > rSupply || _tOwned[_excluded[i]] > tSupply) return _rTotal / _totalSupply;
+            rSupply -= _rOwned[_excluded[i]];
+            tSupply -= _tOwned[_excluded[i]];
+        }
+        if (rSupply < _rTotal / _totalSupply) return _rTotal / _totalSupply;
+        return rSupply / tSupply;
+    }
+
+    function tokenFromReflection(uint256 rAmount) public view returns (uint256) {
+        require(rAmount <= _rTotal);
+        uint256 rate = _getRate();
+        return rAmount / rate;
+    }
+
+    /* ========== Liquidity mechanics ========== */
+    function _swapAndLiquify(uint256 contractTokenBalance) private lockTheSwap {
+        uint256 half = contractTokenBalance / 2;
+        uint256 otherHalf = contractTokenBalance - half;
+
+        uint256 initialBalance = address(this).balance;
+
+        // swap tokens for ETH
+        _approve(address(this), address(uniswapRouter), half);
+        address ;
+        path[0] = address(this);
+        path[1] = uniswapRouter.WETH();
+        uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            half, 0, path, address(this), block.timestamp
+        );
+
+        uint256 newBalance = address(this).balance - initialBalance;
+
+        // add liquidity
+        _approve(address(this), address(uniswapRouter), otherHalf);
+        uniswapRouter.addLiquidityETH{value: newBalance}(
+            address(this), otherHalf, 0, 0, liquidityWallet, block.timestamp
+        );
+
+        emit SwapAndLiquify(half, newBalance, otherHalf);
+    }
+
+    receive() external payable {}
+}
