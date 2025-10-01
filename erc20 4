@@ -1,0 +1,398 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+/*
+  Novel ERC20: DynamicFee + StakingRewards + Lottery
+  Name: test
+  Symbol: TEST
+  Supply: 1_000_000_000 * 10**18
+  Notes: Example / educational contract. Not audited. Use or modify at your own risk.
+*/
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+}
+
+/* ========== Ownable ========== */
+contract Ownable is Context {
+    address private _owner;
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        _owner = _msgSender();
+        emit OwnershipTransferred(address(0), _owner);
+    }
+
+    function owner() public view returns (address) { return _owner; }
+
+    modifier onlyOwner() {
+        require(_msgSender() == _owner, "Ownable: caller is not owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner zero");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+/* ========== ERC20 core (flattened, minimal) ========== */
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to,uint256 amount) external returns (bool);
+    function allowance(address owner,address spender) external view returns (uint256);
+    function approve(address spender,uint256 amount) external returns (bool);
+    function transferFrom(address from,address to,uint256 amount) external returns (bool);
+    event Transfer(address indexed from,address indexed to,uint256 value);
+    event Approval(address indexed owner,address indexed spender,uint256 value);
+}
+
+contract NovelToken is Context, IERC20, Ownable {
+    // metadata
+    string public constant name = "test";
+    string public constant symbol = "TEST";
+    uint8 public constant decimals = 18;
+
+    // supply
+    uint256 private constant INITIAL_SUPPLY = 1_000_000_000 * 10**decimals;
+    uint256 private _totalSupply;
+
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    /* ========== Dynamic fee parameters ========== */
+    // fee is expressed in basis points (bps). 100 bps = 1%
+    uint256 public feeBpsStart = 500; // 5.00% = 500 bps
+    uint256 public feeBpsFloor = 50;  // 0.50% = 50 bps
+    uint256 public feeBpsDecayPerDay = 1; // decrements 1 bps per day
+    uint256 public feeStartTimestamp; // when decay starts (usually contract creation)
+    bool public feeDecayEnabled = true;
+
+    /* fee split percentages (sum = 100) */
+    uint8 public splitToStakers = 50; // 50% of fee goes to staking reward pool
+    uint8 public splitToTreasury = 30; // 30% to treasury
+    uint8 public splitToBurn = 20; // 20% burned
+
+    address public treasury;
+
+    /* ========== Staking reward accounting ========== */
+    uint256 public totalStaked; // total tokens staked
+    uint256 public accRewardPerToken; // scaled by 1e18
+    uint256 private constant ACC_SCALE = 1e18;
+
+    mapping(address => uint256) public stakes;
+    mapping(address => uint256) public stakeRewardDebt; // for reward accounting
+
+    /* ========== Lottery ========== */
+    uint256 public lotteryPool; // tokens set aside for lottery rewards
+    uint256 public lotteryThreshold; // minimum transfer to be entered
+    address[] private lotteryEntries; // naive list for example (duplicates allowed)
+
+    /* ========== Events ========== */
+    event FeeTaken(uint256 feeAmount, uint256 toStakers, uint256 toTreasury, uint256 burned);
+    event Staked(address indexed user, uint256 amount);
+    event Unstaked(address indexed user, uint256 amount);
+    event RewardClaimed(address indexed user, uint256 amount);
+    event LotteryEntered(address indexed user, uint256 amount);
+    event LotteryDraw(address indexed winner, uint256 reward);
+
+    constructor(address _treasury) {
+        require(_treasury != address(0), "treasury zero");
+        treasury = _treasury;
+
+        _mint(_msgSender(), INITIAL_SUPPLY);
+        feeStartTimestamp = block.timestamp;
+        lotteryThreshold = 1000 * 10**decimals; // example: transfers >=1000 tokens enter lottery
+    }
+
+    /* ========== ERC20 basics ========== */
+    function totalSupply() external view override returns (uint256) { return _totalSupply; }
+    function balanceOf(address account) public view override returns (uint256) { return _balances[account]; }
+
+    function transfer(address to, uint256 amount) external override returns (bool) {
+        _transferWithFeatures(_msgSender(), to, amount);
+        return true;
+    }
+
+    function allowance(address owner_, address spender) external view override returns (uint256) {
+        return _allowances[owner_][spender];
+    }
+
+    function approve(address spender, uint256 amount) external override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external override returns (bool) {
+        uint256 current = _allowances[from][_msgSender()];
+        require(current >= amount, "ERC20: transfer exceeds allowance");
+        _transferWithFeatures(from, to, amount);
+        _approve(from, _msgSender(), current - amount);
+        return true;
+    }
+
+    function _approve(address owner_, address spender, uint256 amount) internal {
+        require(owner_ != address(0) && spender != address(0), "approve zero");
+        _allowances[owner_][spender] = amount;
+        emit Approval(owner_, spender, amount);
+    }
+
+    /* ========== Core transfer + fee handling ========== */
+    function _transferWithFeatures(address from, address to, uint256 amount) internal {
+        require(from != address(0) && to != address(0), "transfer zero");
+        require(_balances[from] >= amount, "insufficient balance");
+
+        // claim pending rewards for sender and receiver to keep reward accounting clean
+        _harvestFor(from);
+        _harvestFor(to);
+
+        // compute fee
+        uint256 fee = _currentFeeBps() == 0 ? 0 : (amount * _currentFeeBps()) / 10000;
+
+        uint256 afterFee = amount - fee;
+
+        // update balances
+        _balances[from] -= amount;
+        _balances[to] += afterFee;
+        emit Transfer(from, to, afterFee);
+
+        if (fee > 0) {
+            // split fee
+            uint256 toStakers = (fee * splitToStakers) / 100;
+            uint256 toTreas = (fee * splitToTreasury) / 100;
+            uint256 toBurn = fee - toStakers - toTreas; // remainder
+
+            // distribute to staking pool via accRewardPerToken
+            if (toStakers > 0 && totalStaked > 0) {
+                accRewardPerToken += (toStakers * ACC_SCALE) / totalStaked;
+            } else {
+                // if nobody staked, send staker share to treasury
+                toTreas += toStakers;
+            }
+
+            // treasury
+            if (toTreas > 0) {
+                _balances[treasury] += toTreas;
+                emit Transfer(from, treasury, toTreas);
+            }
+
+            // burn
+            if (toBurn > 0) {
+                _burnInternal(toBurn);
+                emit Transfer(from, address(0), toBurn);
+            }
+
+            emit FeeTaken(fee, toStakers, toTreas, toBurn);
+        }
+
+        // lottery entry if transfer >= threshold: sender gets entry
+        if (amount >= lotteryThreshold) {
+            lotteryEntries.push(from);
+            lotteryPool += 0; // pool funded via admin or from treasury; could also add part of fee
+            emit LotteryEntered(from, amount);
+        }
+    }
+
+    /* ========== Fee model helpers ========== */
+    function _currentFeeBps() public view returns (uint256) {
+        if (!feeDecayEnabled) return feeBpsStart;
+        if (block.timestamp <= feeStartTimestamp) return feeBpsStart;
+        uint256 daysElapsed = (block.timestamp - feeStartTimestamp) / 1 days;
+        uint256 decay = daysElapsed * feeBpsDecayPerDay;
+        if (decay >= feeBpsStart) return feeBpsFloor; // safeguard
+        uint256 cur = feeBpsStart > decay ? (feeBpsStart - decay) : 0;
+        if (cur < feeBpsFloor) return feeBpsFloor;
+        return cur;
+    }
+
+    /* ========== Staking logic ========== */
+    // stake tokens (transfer tokens to contract)
+    function stake(uint256 amount) external {
+        require(amount > 0, "stake 0");
+        require(_balances[_msgSender()] >= amount, "insufficient");
+        // harvest rewards before changing stake position
+        _harvestFor(_msgSender());
+
+        _balances[_msgSender()] -= amount;
+        stakes[_msgSender()] += amount;
+        totalStaked += amount;
+
+        // adjust debt
+        stakeRewardDebt[_msgSender()] = (stakes[_msgSender()] * accRewardPerToken) / ACC_SCALE;
+
+        emit Staked(_msgSender(), amount);
+        emit Transfer(_msgSender(), address(this), amount); // show transfer to contract
+    }
+
+    // unstake and claim rewards
+    function unstake(uint256 amount) external {
+        require(amount > 0, "unstake 0");
+        require(stakes[_msgSender()] >= amount, "not enough staked");
+        _harvestFor(_msgSender());
+
+        stakes[_msgSender()] -= amount;
+        totalStaked -= amount;
+
+        // update debt after reducing stake
+        stakeRewardDebt[_msgSender()] = (stakes[_msgSender()] * accRewardPerToken) / ACC_SCALE;
+
+        _balances[_msgSender()] += amount;
+        emit Unstaked(_msgSender(), amount);
+        emit Transfer(address(this), _msgSender(), amount); // show transfer back
+    }
+
+    // claim rewards only
+    function claimRewards() external {
+        _harvestFor(_msgSender());
+    }
+
+    // internal: compute and send pending rewards to user
+    function _harvestFor(address user) internal {
+        uint256 staked = stakes[user];
+        if (staked == 0) {
+            stakeRewardDebt[user] = 0;
+            return;
+        }
+        uint256 accrued = (staked * accRewardPerToken) / ACC_SCALE;
+        uint256 pending = accrued > stakeRewardDebt[user] ? (accrued - stakeRewardDebt[user]) : 0;
+        if (pending > 0) {
+            // send pending from contract balance (contract accumulates rewards via fee distribution)
+            // ensure contract has enough balance (fees assigned to accRewardPerToken but not kept here)
+            // For simplicity: mint rewards from treasury balance (if treasury has), else reduce from contract (not ideal)
+            // Here we release rewards by transferring from contract's balance (contract should hold tokens from previous mechanisms)
+            if (_balances[address(this)] >= pending) {
+                _balances[address(this)] -= pending;
+                _balances[user] += pending;
+                emit Transfer(address(this), user, pending);
+            } else {
+                // fallback: try treasury
+                uint256 takeFromTreasury = pending;
+                if (_balances[treasury] >= takeFromTreasury) {
+                    _balances[treasury] -= takeFromTreasury;
+                    _balances[user] += takeFromTreasury;
+                    emit Transfer(treasury, user, takeFromTreasury);
+                } else {
+                    // if neither has enough, skip distribution (this is an edge case in this simple example)
+                    pending = 0;
+                }
+            }
+            if (pending > 0) emit RewardClaimed(user, pending);
+        }
+        stakeRewardDebt[user] = (stakes[user] * accRewardPerToken) / ACC_SCALE;
+    }
+
+    /* ========== Lottery functions (owner triggers draw) ========== */
+    // Owner funds lottery pool from treasury (optional)
+    function fundLotteryFromTreasury(uint256 amount) external onlyOwner {
+        require(_balances[treasury] >= amount, "treasury insufficient");
+        _balances[treasury] -= amount;
+        lotteryPool += amount;
+    }
+
+    // Draw random winner from entries and pay reward (naive randomness via blockhash; not secure)
+    function drawLottery() external onlyOwner {
+        require(lotteryEntries.length > 0, "no entries");
+        require(lotteryPool > 0, "no pool");
+        // pseudo-random index
+        uint256 idx = uint256(keccak256(abi.encodePacked(block.timestamp, block.difficulty, lotteryEntries.length))) % lotteryEntries.length;
+        address winner = lotteryEntries[idx];
+
+        uint256 reward = lotteryPool;
+        lotteryPool = 0;
+
+        // pay winner from treasury if contract lacks balance
+        if (_balances[address(this)] >= reward) {
+            _balances[address(this)] -= reward;
+            _balances[winner] += reward;
+            emit Transfer(address(this), winner, reward);
+        } else if (_balances[treasury] >= reward) {
+            _balances[treasury] -= reward;
+            _balances[winner] += reward;
+            emit Transfer(treasury, winner, reward);
+        } else {
+            // as a last resort, try burn/skip (not ideal)
+            reward = 0;
+        }
+
+        // clear entries
+        delete lotteryEntries;
+        emit LotteryDraw(winner, reward);
+    }
+
+    /* ========== Admin setters ========== */
+    function setFeeParams(uint256 _startBps, uint256 _floorBps, uint256 _decayPerDay, bool _enableDecay) external onlyOwner {
+        require(_floorBps <= _startBps, "floor > start");
+        feeBpsStart = _startBps;
+        feeBpsFloor = _floorBps;
+        feeBpsDecayPerDay = _decayPerDay;
+        feeDecayEnabled = _enableDecay;
+        feeStartTimestamp = block.timestamp; // reset decay baseline
+    }
+
+    function setFeeSplits(uint8 toStakers, uint8 toTreasury, uint8 toBurn) external onlyOwner {
+        require(uint256(toStakers) + uint256(toTreasury) + uint256(toBurn) == 100, "splits must sum 100");
+        splitToStakers = toStakers;
+        splitToTreasury = toTreasury;
+        splitToBurn = toBurn;
+    }
+
+    function setTreasury(address _treasury) external onlyOwner {
+        require(_treasury != address(0), "zero");
+        treasury = _treasury;
+    }
+
+    function setLotteryThreshold(uint256 amount) external onlyOwner {
+        lotteryThreshold = amount;
+    }
+
+    /* ========== Internal mint/burn helpers ========== */
+    function _mint(address to, uint256 amount) internal {
+        require(to != address(0), "mint zero");
+        _totalSupply += amount;
+        _balances[to] += amount;
+        emit Transfer(address(0), to, amount);
+    }
+
+    function _burnInternal(uint256 amount) internal {
+        // burn from total supply: take from contract's own balance ideally or reduce total supply directly
+        // For this example, we reduce totalSupply and assume tokens are already removed from sender
+        _totalSupply -= amount;
+    }
+
+    /* ========== Utility functions ========== */
+    // emergency withdraw small tokens mistakenly sent to contract (owner only)
+    function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+        require(token != address(this), "can't rescue self");
+        IERC20(token).transfer(to, amount);
+    }
+
+    // In this simplified example, owner may deposit tokens to contract to cover rewards/lottery
+    function depositToContract(uint256 amount) external {
+        // caller must approve contract beforehand if using transferFrom, but to keep simple: require caller has balance and send
+        require(_balances[_msgSender()] >= amount, "insufficient");
+        _balances[_msgSender()] -= amount;
+        _balances[address(this)] += amount;
+        emit Transfer(_msgSender(), address(this), amount);
+    }
+
+    /* ========== Fallbacks & view helpers ========== */
+    function stakedOf(address user) external view returns (uint256) { return stakes[user]; }
+    function pendingRewards(address user) external view returns (uint256) {
+        uint256 staked = stakes[user];
+        if (staked == 0) return 0;
+        uint256 accrued = (staked * accRewardPerToken) / ACC_SCALE;
+        uint256 pending = accrued > stakeRewardDebt[user] ? (accrued - stakeRewardDebt[user]) : 0;
+        return pending;
+    }
+
+    function entriesCount() external view returns (uint256) { return lotteryEntries.length; }
+
+    /* ========== Transfer event emission helper ========== */
+    event Transfer(address indexed from,address indexed to,uint256 value);
+
+    /* ========== Initial mint done above; other functions done ========== */
+}
