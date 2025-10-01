@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+/* ===========================================================
+   Deflationary ERC20 Token with Fees + Blacklist + Anti-Whale
+   Name: test
+   Symbol: TEST
+   Supply: 1,000,000,000 (1B) tokens, 18 decimals
+   Features:
+     - 2% fee on transfers
+     - Fee sent to treasury
+     - Blacklist control
+     - Max tx size (anti-whale)
+     - Fixed supply
+   =========================================================== */
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+}
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient,uint256 amount) external returns (bool);
+    function allowance(address owner,address spender) external view returns (uint256);
+    function approve(address spender,uint256 amount) external returns (bool);
+    function transferFrom(address sender,address recipient,uint256 amount) external returns (bool);
+
+    event Transfer(address indexed from,address indexed to,uint256 value);
+    event Approval(address indexed owner,address indexed spender,uint256 value);
+}
+
+abstract contract Ownable is Context {
+    address private _owner;
+    event OwnershipTransferred(address indexed prev,address indexed newOwner);
+    constructor(){_transferOwnership(_msgSender());}
+    function owner() public view returns(address){return _owner;}
+    modifier onlyOwner(){require(owner()==_msgSender(),"not owner");_;}
+
+    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner!=address(0),"zero addr");
+        _transferOwnership(newOwner);
+    }
+    function renounceOwnership() public onlyOwner {
+        _transferOwnership(address(0));
+    }
+    function _transferOwnership(address newOwner) internal {
+        address old=_owner;_owner=newOwner;
+        emit OwnershipTransferred(old,newOwner);
+    }
+}
+
+contract TestFeeToken is Context, IERC20, Ownable {
+    string private constant _name = "test";
+    string private constant _symbol = "TEST";
+    uint8 private constant _decimals = 18;
+    uint256 private immutable _totalSupply;
+
+    mapping(address=>uint256) private _balances;
+    mapping(address=>mapping(address=>uint256)) private _allowances;
+
+    // Fee + treasury
+    uint256 public feeBasisPoints = 200; // 2% (200 / 10000)
+    address public treasury;
+
+    // Anti-whale
+    uint256 public maxTxAmount;
+
+    // Blacklist
+    mapping(address=>bool) public blacklist;
+
+    event TreasuryChanged(address indexed newTreasury);
+    event Blacklisted(address indexed account,bool status);
+
+    constructor(address _treasury) {
+        require(_treasury!=address(0),"treasury zero addr");
+        treasury=_treasury;
+
+        uint256 supply=1_000_000_000 * 10**_decimals;
+        _totalSupply=supply;
+        _balances[_msgSender()]=supply;
+
+        // Default: max tx = 1% of total supply
+        maxTxAmount = supply / 100;
+
+        emit Transfer(address(0),_msgSender(),supply);
+    }
+
+    // ERC20 metadata
+    function name() public pure returns(string memory){return _name;}
+    function symbol() public pure returns(string memory){return _symbol;}
+    function decimals() public pure returns(uint8){return _decimals;}
+    function totalSupply() public view override returns(uint256){return _totalSupply;}
+
+    // ERC20 balance
+    function balanceOf(address account) public view override returns(uint256){return _balances[account];}
+
+    // Transfer logic with fee + blacklist + maxTx
+    function transfer(address to,uint256 amount) public override returns(bool){
+        _transfer(_msgSender(),to,amount);return true;
+    }
+    function allowance(address owner,address spender) public view override returns(uint256){
+        return _allowances[owner][spender];
+    }
+    function approve(address spender,uint256 amount) public override returns(bool){
+        _approve(_msgSender(),spender,amount);return true;
+    }
+    function transferFrom(address from,address to,uint256 amount) public override returns(bool){
+        uint256 current=_allowances[from][_msgSender()];
+        require(current>=amount,"exceeds allowance");
+        _transfer(from,to,amount);
+        _approve(from,_msgSender(),current-amount);
+        return true;
+    }
+
+    function _approve(address owner_,address spender,uint256 amount) internal {
+        require(owner_!=address(0)&&spender!=address(0),"zero addr");
+        _allowances[owner_][spender]=amount;
+        emit Approval(owner_,spender,amount);
+    }
+
+    function _transfer(address from,address to,uint256 amount) internal {
+        require(from!=address(0)&&to!=address(0),"zero addr");
+        require(!blacklist[from] && !blacklist[to],"blacklisted");
+        require(amount<=maxTxAmount,"maxTx limit");
+
+        uint256 bal=_balances[from];
+        require(bal>=amount,"insufficient");
+
+        // fee calc
+        uint256 fee=(amount*feeBasisPoints)/10000;
+        uint256 sendAmount=amount-fee;
+
+        _balances[from]=bal-amount;
+        _balances[to]+=_safe(sendAmount);
+        emit Transfer(from,to,sendAmount);
+
+        if(fee>0){
+            _balances[treasury]+=_safe(fee);
+            emit Transfer(from,treasury,fee);
+        }
+    }
+
+    function _safe(uint256 a) private pure returns(uint256){return a;}
+
+    // ====== Owner controls ======
+    function setTreasury(address t) external onlyOwner {
+        require(t!=address(0),"zero addr");
+        treasury=t; emit TreasuryChanged(t);
+    }
+    function setFee(uint256 bp) external onlyOwner {
+        require(bp<=1000,"max 10%");
+        feeBasisPoints=bp;
+    }
+    function setMaxTxAmount(uint256 amt) external onlyOwner {
+        require(amt>0,"amt zero");
+        maxTxAmount=amt;
+    }
+    function setBlacklist(address acc,bool status) external onlyOwner {
+        blacklist[acc]=status; emit Blacklisted(acc,status);
+    }
+}
