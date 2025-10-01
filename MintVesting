@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract MintVestingToken {
+    string public name = "MintVesting";
+    string public symbol = "MVT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => uint256) public releaseTime;
+    address public owner;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    constructor() { owner = msg.sender; }
+
+    function mint(address to, uint256 amount, uint256 unlockTime) public {
+        require(msg.sender == owner, "Only owner");
+        totalSupply += amount;
+        balanceOf[to] += amount;
+        releaseTime[to] = unlockTime;
+        emit Transfer(address(0), to, amount);
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(block.timestamp >= releaseTime[msg.sender], "Tokens locked");
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+}
