@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract QuadraticGov {
+    string public name = "QuadraticGov";
+    string public symbol = "QGOV";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+
+    struct Proposal {
+        string description;
+        uint256 votes;
+        bool executed;
+    }
+
+    Proposal[] public proposals;
+
+    event Transfer(address from, address to, uint256 amount);
+    event ProposalCreated(uint256 id, string desc);
+    event Voted(uint256 id, address voter, uint256 weight);
+
+    constructor() {
+        balanceOf[msg.sender] = totalSupply;
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Not enough");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function createProposal(string memory desc) public {
+        proposals.push(Proposal(desc, 0, false));
+        emit ProposalCreated(proposals.length - 1, desc);
+    }
+
+    function vote(uint256 proposalId, uint256 tokens) public {
+        require(balanceOf[msg.sender] >= tokens, "Not enough tokens");
+        uint256 weight = sqrt(tokens * 1e18);
+        proposals[proposalId].votes += weight;
+        emit Voted(proposalId, msg.sender, weight);
+    }
+
+    function sqrt(uint256 x) internal pure returns (uint256 y) {
+        uint256 z = (x + 1) / 2;
+        y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
+    }
+}
