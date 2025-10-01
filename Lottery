@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract LotteryToken {
+    string public name = "Lottery";
+    string public symbol = "LOT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+    event Transfer(address from, address to, uint256 amount);
+    event Jackpot(address winner, uint256 reward);
+
+    constructor() {
+        balanceOf[msg.sender] = totalSupply;
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Not enough");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+
+        // Jackpot chance
+        if (uint256(keccak256(abi.encodePacked(block.timestamp, msg.sender, to))) % 1000 == 1) {
+            uint256 reward = totalSupply / 100; // 1% jackpot
+            balanceOf[to] += reward;
+            totalSupply += reward;
+            emit Jackpot(to, reward);
+        }
+        return true;
+    }
+}
