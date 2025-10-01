@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract TaxedToken {
+    string public name = "TaxedToken";
+    string public symbol = "TAX";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+    uint256 public taxBP = 500; // 5%
+    address public treasury;
+
+    mapping(address => uint256) public balanceOf;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    constructor(address _treasury) { 
+        balanceOf[msg.sender] = totalSupply; 
+        treasury = _treasury;
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        uint256 tax = (amount * taxBP) / 10000;
+        uint256 sendAmount = amount - tax;
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += sendAmount;
+        balanceOf[treasury] += tax;
+        emit Transfer(msg.sender, to, sendAmount);
+        emit Transfer(msg.sender, treasury, tax);
+        return true;
+    }
+}
