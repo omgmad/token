@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract LotteryBurnToken {
+    string public name = "LotteryBurn";
+    string public symbol = "LBT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    constructor() { balanceOf[msg.sender] = totalSupply; }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        uint256 burn = (block.timestamp % 1000 == 0) ? amount / 10 : 0;
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount - burn;
+        totalSupply -= burn;
+        emit Transfer(msg.sender, to, amount - burn);
+        if (burn > 0) emit Transfer(msg.sender, address(0), burn);
+        return true;
+    }
+}
