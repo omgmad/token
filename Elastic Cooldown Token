@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract ElasticCooldown {
+    string public name = "ElasticCooldown";
+    string public symbol = "ECT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000 * 1e18;
+    uint256 public baseCooldown = 3;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => uint256) public lastTxBlock;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    constructor(){ balanceOf[msg.sender] = totalSupply; }
+
+    function transfer(address to, uint256 amount) public returns(bool){
+        uint256 blocksSince = block.number - lastTxBlock[msg.sender];
+        require(blocksSince >= baseCooldown, "Cooldown active");
+        uint256 penalty = 0;
+        if(blocksSince < 10) penalty = (amount*5)/100; // 5% penalty
+        uint256 sendAmount = amount - penalty;
+        require(balanceOf[msg.sender] >= amount, "Insufficient");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += sendAmount;
+        balanceOf[address(this)] += penalty;
+        lastTxBlock[msg.sender] = block.number;
+        emit Transfer(msg.sender, to, sendAmount);
+        return true;
+    }
+}
